@@ -4,6 +4,14 @@ A chess game written in Python with a fully interactive Pygame GUI and an AI opp
 
 ---
 
+## Screenshots
+
+| Menu | In game |
+|------|---------|
+| ![Difficulty menu](assets/screenshots/menu.png) | ![Game in progress](assets/screenshots/game.png) |
+
+---
+
 ## Features
 
 - **Complete chess rules** — legal move generation for all pieces, castling, en passant, and pawn promotion (auto-queens)
