@@ -1,36 +1,174 @@
 import pygame
 from src.chess_engine import ChessEngine
 
+SQUARE = 100
+SIZE = SQUARE * 8
+
+LIGHT       = (240, 217, 181)
+DARK        = (181, 136,  99)
+SELECTED    = (205, 210, 106, 160)
+MOVE_DOT    = (106, 135,  75, 160)
+MOVE_RING   = (106, 135,  75, 180)
+CHECK_RED   = (220,  50,  50, 120)
+
+
 class ChessGUI:
     def __init__(self):
         pygame.init()
-        self.screen = pygame.display.set_mode((800, 800))
+        self.screen = pygame.display.set_mode((SIZE, SIZE))
         pygame.display.set_caption("Chess Engine")
         self.clock = pygame.time.Clock()
         self.engine = ChessEngine()
         self.load_images()
 
+        self.selected    = None   # (col, row) in numpy coords
+        self.legal_moves = []     # [(x, y), ...] in engine notation
+        self.turn        = 'white'
+        self.game_over   = False
+        self.status      = ""
+
+    # ------------------------------------------------------------------ helpers
+
     def load_images(self):
-        piece_values = {1: 'wp', 2: 'wn', 3: 'wb', 4: 'wr', 5: 'wq', 6: 'wk',
-                        -1: 'bp', -2: 'bn', -3: 'bb', -4: 'br', -5: 'bq', -6: 'bk'}
+        names = {1:'wp', 2:'wn', 3:'wb', 4:'wr', 5:'wq', 6:'wk',
+                -1:'bp',-2:'bn',-3:'bb',-4:'br',-5:'bq',-6:'bk'}
         self.images = {}
-        for value, piece in piece_values.items():
-            self.images[value] = pygame.image.load(f"assets/images/{piece}.png")
-            self.images[value] = pygame.transform.scale(self.images[value], (100, 100))
+        for v, name in names.items():
+            img = pygame.image.load(f"assets/images/{name}.png")
+            self.images[v] = pygame.transform.scale(img, (SQUARE, SQUARE))
+
+    def to_screen(self, col, row):
+        """Numpy (col, row) → screen (x, y).  White is at the bottom."""
+        return col * SQUARE, (7 - row) * SQUARE
+
+    def to_board(self, sx, sy):
+        """Screen pixel → numpy (col, row)."""
+        return sx // SQUARE, 7 - sy // SQUARE
+
+    # ------------------------------------------------------------------ drawing
 
     def draw_board(self):
-        colors = [pygame.Color("white"), pygame.Color("gray")]
         for row in range(8):
             for col in range(8):
-                color = colors[(row + col) % 2]
-                pygame.draw.rect(self.screen, color, pygame.Rect(col*100, row*100, 100, 100))
+                colour = LIGHT if (row + col) % 2 == 0 else DARK
+                sx, sy = self.to_screen(col, row)
+                pygame.draw.rect(self.screen, colour, (sx, sy, SQUARE, SQUARE))
+
+    def draw_highlights(self):
+        # King-in-check flash
+        if self.engine.is_in_check(self.turn):
+            king_val = 6 if self.turn == 'white' else -6
+            for r in range(8):
+                for c in range(8):
+                    if self.engine.board[r, c] == king_val:
+                        self._fill_square(c, r, CHECK_RED)
+
+        # Selected square
+        if self.selected is not None:
+            self._fill_square(*self.selected, SELECTED)
+
+        # Legal move indicators
+        for mx, my in self.legal_moves:
+            c = ord(mx) - ord('a')
+            r = my - 1
+            sx, sy = self.to_screen(c, r)
+            if self.engine.board[r, c] != 0:          # capture → ring
+                surf = pygame.Surface((SQUARE, SQUARE), pygame.SRCALPHA)
+                pygame.draw.rect(surf, MOVE_RING, (0, 0, SQUARE, SQUARE), 8)
+                self.screen.blit(surf, (sx, sy))
+            else:                                      # empty → dot
+                surf = pygame.Surface((SQUARE, SQUARE), pygame.SRCALPHA)
+                pygame.draw.circle(surf, MOVE_DOT, (SQUARE//2, SQUARE//2), 18)
+                self.screen.blit(surf, (sx, sy))
 
     def draw_pieces(self):
         for row in range(8):
             for col in range(8):
                 piece = self.engine.board[row, col]
                 if piece != 0:
-                    self.screen.blit(self.images[piece], pygame.Rect(col*100, row*100, 100, 100))
+                    sx, sy = self.to_screen(col, row)
+                    self.screen.blit(self.images[piece], (sx, sy))
+
+    def draw_status(self):
+        if not self.status:
+            return
+        font = pygame.font.SysFont("Arial", 40, bold=True)
+        text = font.render(self.status, True, (255, 255, 255))
+        pad = 16
+        w, h = text.get_width() + pad*2, text.get_height() + pad
+        bg = pygame.Surface((w, h), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 190))
+        bx, by = SIZE//2 - w//2, SIZE//2 - h//2
+        self.screen.blit(bg, (bx, by))
+        self.screen.blit(text, (bx + pad, by + pad//2))
+
+    def _fill_square(self, col, row, rgba):
+        surf = pygame.Surface((SQUARE, SQUARE), pygame.SRCALPHA)
+        surf.fill(rgba)
+        self.screen.blit(surf, self.to_screen(col, row))
+
+    # ------------------------------------------------------------------ logic
+
+    def handle_click(self, sx, sy):
+        if self.game_over or self.turn != 'white':
+            return
+        col, row = self.to_board(sx, sy)
+        if not (0 <= col < 8 and 0 <= row < 8):
+            return
+
+        piece = self.engine.board[row, col]
+        x, y  = chr(ord('a') + col), row + 1   # engine notation
+
+        if self.selected is not None:
+            sc, sr    = self.selected
+            from_x    = chr(ord('a') + sc)
+            from_y    = sr + 1
+
+            if (x, y) in self.legal_moves:
+                # Execute human move
+                self.engine.make_move(from_x, from_y, x, y)
+                self.selected, self.legal_moves = None, []
+                if not self.check_game_over('black'):
+                    self.turn = 'black'
+                    # Trigger AI after a brief delay so the board redraws first
+                    pygame.time.set_timer(pygame.USEREVENT, 150)
+                return
+
+            # Re-select another own piece
+            if piece > 0:
+                self.selected    = (col, row)
+                self.legal_moves = self.engine.get_legal_moves(x, y)
+                return
+
+            # Click elsewhere → deselect
+            self.selected, self.legal_moves = None, []
+            return
+
+        # First click: select a white piece
+        if piece > 0:
+            self.selected    = (col, row)
+            self.legal_moves = self.engine.get_legal_moves(x, y)
+
+    def ai_move(self):
+        move = self.engine.choose_best_move('black', 2)
+        if move:
+            self.engine.make_move(*move)
+        if not self.check_game_over('white'):
+            self.turn = 'white'
+
+    def check_game_over(self, color):
+        if self.engine.is_checkmate(color):
+            winner = 'Black' if color == 'white' else 'White'
+            self.status    = f"Checkmate — {winner} wins!"
+            self.game_over = True
+            return True
+        if len(self.engine.get_all_moves(color)) == 0:
+            self.status    = "Stalemate!"
+            self.game_over = True
+            return True
+        return False
+
+    # ------------------------------------------------------------------ main loop
 
     def run(self):
         running = True
@@ -38,14 +176,21 @@ class ChessGUI:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_click(*event.pos)
+                elif event.type == pygame.USEREVENT:
+                    pygame.time.set_timer(pygame.USEREVENT, 0)  # one-shot
+                    self.ai_move()
 
             self.draw_board()
+            self.draw_highlights()
             self.draw_pieces()
-            
+            self.draw_status()
             pygame.display.flip()
             self.clock.tick(60)
 
         pygame.quit()
+
 
 if __name__ == "__main__":
     gui = ChessGUI()
