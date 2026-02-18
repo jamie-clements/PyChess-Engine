@@ -78,7 +78,7 @@ class ChessEngine:
         if self.en_passant_target:
             en_passant_x, en_passant_y = self.en_passant_target
             if abs(ord(x) - ord(en_passant_x)) == 1 and ((color == 'white' and y == 5) or (color == 'black' and y == 4)):
-                moves.append((en_passant_x, en_passant_y + (1 if color == 'white' else -1)))
+                moves.append((en_passant_x, en_passant_y))
 
         return moves
     
@@ -163,7 +163,7 @@ class ChessEngine:
         for i in range(8):
             for j in range(8):
                 piece = self.board[i, j]
-                if (piece > 0 and attacking_color == 'black') or (piece < 0 and attacking_color == 'white'):
+                if (piece > 0 and attacking_color == 'white') or (piece < 0 and attacking_color == 'black'):
                     moves = self.get_basic_moves(chr(ord('a') + j), i + 1)
                     if (x, y) in moves:
                         return True
@@ -235,62 +235,60 @@ class ChessEngine:
         return moves
 
     def make_move(self, from_x, from_y, to_x, to_y):
-        # Capture the piece at the destination (if any)
-        captured_piece = self.board[to_y-1, ord(to_x)-ord('a')]
-        
-        # Move the piece
         piece = self.board[from_y-1, ord(from_x)-ord('a')]
+        captured_piece = self.board[to_y-1, ord(to_x)-ord('a')]
         color = 'white' if piece > 0 else 'black'
-        
-        # Record the move in history (include en passant info)
-        self.move_history.append((from_x, from_y, to_x, to_y, captured_piece, self.en_passant_target))
-        
+
+        # Record full state needed to undo: original piece + all castling flags
+        self.move_history.append((
+            from_x, from_y, to_x, to_y, piece, captured_piece,
+            self.en_passant_target,
+            self.white_king_moved, self.black_king_moved,
+            list(self.white_rooks_moved), list(self.black_rooks_moved)
+        ))
+
+        # Move the piece
         self.board[to_y-1, ord(to_x)-ord('a')] = piece
         self.board[from_y-1, ord(from_x)-ord('a')] = 0
 
-        # Update king and rook move flags
+        # Update flags and handle special moves
         if abs(piece) == 6:  # King
             if piece > 0:
                 self.white_king_moved = True
             else:
                 self.black_king_moved = True
-
-            # Handle castling
+            # Castling: slide the rook inline (no recursive make_move)
             if abs(ord(to_x) - ord(from_x)) == 2:
                 if to_x == 'g':  # Kingside
-                    rook_from, rook_to = ('h', 'f')
+                    rook_from_col, rook_to_col = ord('h') - ord('a'), ord('f') - ord('a')
                 else:  # Queenside
-                    rook_from, rook_to = ('a', 'd')
-                self.make_move(rook_from, from_y, rook_to, to_y)
+                    rook_from_col, rook_to_col = ord('a') - ord('a'), ord('d') - ord('a')
+                rook = self.board[from_y-1, rook_from_col]
+                self.board[from_y-1, rook_to_col] = rook
+                self.board[from_y-1, rook_from_col] = 0
 
-        elif abs(piece) == 4:  # Rook
-            if from_x == 'a':  # Queenside
-                if piece > 0:
-                    self.white_rooks_moved[0] = True
-                else:
-                    self.black_rooks_moved[0] = True
-            elif from_x == 'h':  # Kingside
-                if piece > 0:
-                    self.white_rooks_moved[1] = True
-                else:
-                    self.black_rooks_moved[1] = True
+        elif abs(piece) == 4:  # Rook moved — forfeit castling right on that side
+            if from_x == 'a':
+                if piece > 0: self.white_rooks_moved[0] = True
+                else: self.black_rooks_moved[0] = True
+            elif from_x == 'h':
+                if piece > 0: self.white_rooks_moved[1] = True
+                else: self.black_rooks_moved[1] = True
 
-        # Handle pawn promotion
+        # Pawn promotion (auto-queen)
         if abs(piece) == 1 and (to_y == 8 or to_y == 1):
-            self.board[to_y-1, ord(to_x)-ord('a')] = 5 if piece > 0 else -5  # Promote to queen
+            self.board[to_y-1, ord(to_x)-ord('a')] = 5 if piece > 0 else -5
 
-        # Handle en passant
+        # En passant state update
         if abs(piece) == 1 and abs(from_y - to_y) == 2:
+            # Double push — set target square for opponent
             self.en_passant_target = (to_x, (from_y + to_y) // 2)
         elif abs(piece) == 1 and to_x != from_x and captured_piece == 0:
-            # En passant capture
+            # En passant capture — remove the bypassed pawn
             captured_pawn_y = to_y - 1 if color == 'white' else to_y + 1
             self.board[captured_pawn_y-1, ord(to_x)-ord('a')] = 0
-        else:
             self.en_passant_target = None
-
-        # Clear en passant target after any non-pawn move or non-double-step pawn move
-        if abs(piece) != 1 or abs(from_y - to_y) != 2:
+        else:
             self.en_passant_target = None
 
     
@@ -298,9 +296,9 @@ class ChessEngine:
         # Function to evaluate board state.
         # To be used by minmax algo to assess pos.
         if self.is_checkmate('white'):
-            return -float('int')
+            return -float('inf')
         if self.is_checkmate('black'):
-            return float('int')
+            return float('inf')
         
         value = 0
         piece_values = {1: 100, 2: 320, 3: 330, 4: 500, 5: 900, 6: 20000}
@@ -319,33 +317,10 @@ class ChessEngine:
         return value
     
     def is_checkmate(self, color):
-        # First, check if the king is in check
         if not self.is_in_check(color):
             return False
-        
-        # If in check, see if there are any legal moves that get out of check
-        for y in range(8):
-            for x in range(8):
-                piece = self.board[y, x]
-                if (piece > 0 and color == 'white') or (piece < 0 and color == 'black'):
-                    moves = self.get_moves(chr(ord('a') + x), y + 1)
-                    for move in moves:
-                        # Make the move
-                        captured_piece = self.board[move[1]-1, ord(move[0])-ord('a')]
-                        self.make_move(chr(ord('a') + x), y + 1, move[0], move[1])
-                        
-                        # Check if still in check
-                        still_in_check = self.is_in_check(color)
-                        
-                        # Undo the move
-                        self.undo_move()
-                        
-                        # If this move gets out of check, it's not checkmate
-                        if not still_in_check:
-                            return False
-    
-        # If we've checked all moves and none get out of check, it's checkmate
-        return True
+        # Checkmate if in check and no legal move exists
+        return len(self.get_all_moves(color)) == 0
 
     def is_in_check(self, color):
         # Find the king
@@ -368,7 +343,7 @@ class ChessEngine:
             for x in range(8):
                 piece = self.board[y, x]
                 if (piece < 0 and opponent_color == 'black') or (piece > 0 and opponent_color == 'white'):
-                    moves = self.get_moves(chr(ord('a') + x), y + 1)
+                    moves = self.get_basic_moves(chr(ord('a') + x), y + 1)
                     if (chr(ord('a') + king_pos[0]), king_pos[1] + 1) in moves:
                         return True
         
@@ -383,7 +358,7 @@ class ChessEngine:
             for move in self.get_all_moves('white'):
                 self.make_move(*move)
                 eval = self.minimax(depth - 1, alpha, beta, False)
-                self.undo_move()  # You'll need to implement this
+                self.undo_move()
                 max_eval = max(max_eval, eval)
                 alpha = max(alpha, eval)
                 if beta <= alpha:
@@ -394,12 +369,26 @@ class ChessEngine:
             for move in self.get_all_moves('black'):
                 self.make_move(*move)
                 eval = self.minimax(depth - 1, alpha, beta, True)
-                self.undo_move()  # You'll need to implement this
+                self.undo_move()
                 min_eval = min(min_eval, eval)
                 beta = min(beta, eval)
                 if beta <= alpha:
                     break
             return min_eval
+
+    def get_legal_moves(self, x, y):
+        """Filters get_moves to only moves that don't leave own king in check."""
+        piece = self.board[y-1, ord(x)-ord('a')]
+        if piece == 0:
+            return []
+        color = 'white' if piece > 0 else 'black'
+        legal = []
+        for move in self.get_moves(x, y):
+            self.make_move(x, y, move[0], move[1])
+            if not self.is_in_check(color):
+                legal.append(move)
+            self.undo_move()
+        return legal
 
     def get_all_moves(self, color):
         moves = []
@@ -407,8 +396,9 @@ class ChessEngine:
             for x in range(8):
                 piece = self.board[y, x]
                 if (piece > 0 and color == 'white') or (piece < 0 and color == 'black'):
-                    for move in self.get_moves(chr(ord('a') + x), y + 1):
-                        moves.append((chr(ord('a') + x), y + 1, move[0], move[1]))
+                    sq_x = chr(ord('a') + x)
+                    for move in self.get_legal_moves(sq_x, y + 1):
+                        moves.append((sq_x, y + 1, move[0], move[1]))
         return moves
 
     def choose_best_move(self, color, depth):
@@ -418,7 +408,7 @@ class ChessEngine:
         for move in self.get_all_moves(color):
             self.make_move(*move)
             eval = self.minimax(depth - 1, -float('inf'), float('inf'), color == 'black')
-            self.undo_move()  # You'll need to implement this
+            self.undo_move()
             
             if color == 'white' and eval > best_eval:
                 best_eval = eval
@@ -432,47 +422,34 @@ class ChessEngine:
     def undo_move(self):
         if not self.move_history:
             return
-        last_move = self.move_history.pop()
-        from_x, from_y, to_x, to_y, captured_piece, old_en_passant_target = last_move
-        
-        # Restore the moved piece
-        self.board[from_y-1, ord(from_x)-ord('a')] = self.board[to_y-1, ord(to_x)-ord('a')]
-        # Restore the captured piece (if any)
+        (from_x, from_y, to_x, to_y, original_piece, captured_piece,
+         old_en_passant_target,
+         old_white_king_moved, old_black_king_moved,
+         old_white_rooks_moved, old_black_rooks_moved) = self.move_history.pop()
+
+        # Restore the original piece to its starting square
+        self.board[from_y-1, ord(from_x)-ord('a')] = original_piece
+        # Restore whatever was on the destination (captured piece or empty)
         self.board[to_y-1, ord(to_x)-ord('a')] = captured_piece
-        
-        # Restore the old en passant target
+
+        # Restore all castling flags and en passant from the snapshot
         self.en_passant_target = old_en_passant_target
+        self.white_king_moved = old_white_king_moved
+        self.black_king_moved = old_black_king_moved
+        self.white_rooks_moved = old_white_rooks_moved
+        self.black_rooks_moved = old_black_rooks_moved
 
-        # Undo castling if it was a castling move
-        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 6 and abs(ord(to_x) - ord(from_x)) == 2:
-            if to_x == 'g':  # Kingside
-                self.undo_move()  # Undo rook move
-            elif to_x == 'c':  # Queenside
-                self.undo_move()  # Undo rook move
+        # Castling: slide the rook back inline (mirrors make_move)
+        if abs(original_piece) == 6 and abs(ord(to_x) - ord(from_x)) == 2:
+            if to_x == 'g':  # Kingside: rook was moved h→f
+                rook_from_col, rook_to_col = ord('h') - ord('a'), ord('f') - ord('a')
+            else:  # Queenside: rook was moved a→d
+                rook_from_col, rook_to_col = ord('a') - ord('a'), ord('d') - ord('a')
+            rook = self.board[from_y-1, rook_to_col]
+            self.board[from_y-1, rook_from_col] = rook
+            self.board[from_y-1, rook_to_col] = 0
 
-        # Reset king and rook move flags if necessary
-        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 6:  # King
-            if self.board[from_y-1, ord(from_x)-ord('a')] > 0:
-                self.white_king_moved = False
-            else:
-                self.black_king_moved = False
-        elif abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 4:  # Rook
-            if from_x == 'a':  # Queenside
-                if self.board[from_y-1, ord(from_x)-ord('a')] > 0:
-                    self.white_rooks_moved[0] = False
-                else:
-                    self.black_rooks_moved[0] = False
-            elif from_x == 'h':  # Kingside
-                if self.board[from_y-1, ord(from_x)-ord('a')] > 0:
-                    self.white_rooks_moved[1] = False
-                else:
-                    self.black_rooks_moved[1] = False
-
-        # Undo en passant capture
-        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 1 and to_x != from_x and captured_piece == 0:
-            captured_pawn_y = from_y if self.board[from_y-1, ord(from_x)-ord('a')] > 0 else from_y - 2
-            self.board[captured_pawn_y-1, ord(to_x)-ord('a')] = -1 if self.board[from_y-1, ord(from_x)-ord('a')] > 0 else 1
-
-        # Undo pawn promotion
-        if abs(self.board[from_y-1, ord(from_x)-ord('a')]) == 5 and abs(captured_piece) == 1:
-            self.board[from_y-1, ord(from_x)-ord('a')] = captured_piece
+        # En passant capture: restore the bypassed pawn
+        elif abs(original_piece) == 1 and to_x != from_x and captured_piece == 0:
+            # The captured pawn sat on the same rank as the capturing pawn's origin
+            self.board[from_y-1, ord(to_x)-ord('a')] = -1 if original_piece > 0 else 1
